@@ -1054,6 +1054,7 @@ where
 				});
 				return;
 			},
+			/*
 			LdkEvent::InvoiceGenerated { invoice } => {
 				// TODO: For now we only insert a new pending payment with id derived from the
 				// payment hash to the store. We should eventually associate this with the original
@@ -1093,6 +1094,7 @@ where
 					panic!("Failed to access payment store");
 				});
 			},
+			*/
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let runtime_lock = self.runtime.read().unwrap();
 				debug_assert!(runtime_lock.is_some());
@@ -1121,6 +1123,18 @@ where
 					});
 				}
 			},
+			lightning::events::Event::OpenChannelV2Request { .. } => {
+				log_info!(self.logger, "OpenChannelV2Request");
+			}
+			lightning::events::Event::FundingInputsContributionReady { .. } => {
+				log_info!(self.logger, "FundingInputsContributionReady");
+			}
+			lightning::events::Event::FundingTransactionReadyForSigning { .. } => {
+				log_info!(self.logger, "FundingTransactionReadyForSigning");
+			}
+			lightning::events::Event::SpliceAckedInputsContributionReady { .. } => {
+				log_info!(self.logger, "SpliceAckedInputsContributionReady");
+			}
 		}
 	}
 }
