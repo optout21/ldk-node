@@ -1175,6 +1175,36 @@ impl Node {
 		})
 	}
 
+	/// #SPLICING
+	/// Initiate splicing on an existing open channel
+	pub fn splice_channel(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, delta_amount_sats: i64
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			let funding_feerate_perkw = 1024; // TODO
+			let locktime = 0; // TODO
+			self.channel_manager
+				.splice_channel(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					delta_amount_sats,
+					funding_feerate_perkw,
+					locktime,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSpliceFailed
+				})?;
+			Ok(())
+		} else {
+			Ok(())
+		}
+	}
+
 	/// Close a previously opened channel.
 	///
 	/// If `force` is set to `true`, we will force-close the channel, potentially broadcasting our

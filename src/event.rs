@@ -25,7 +25,7 @@ use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::{ChannelId, PaymentHash};
-use lightning::offers::offer::Amount;
+// use lightning::offers::offer::Amount;
 use lightning::routing::gossip::NodeId;
 use lightning::util::errors::APIError;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
@@ -1132,6 +1132,7 @@ where
 			lightning::events::Event::FundingTransactionReadyForSigning { .. } => {
 				log_info!(self.logger, "FundingTransactionReadyForSigning");
 			}
+			// #SPLICING
 			lightning::events::Event::SpliceAckedInputsContributionReady { .. } => {
 				log_info!(self.logger, "SpliceAckedInputsContributionReady");
 			}
