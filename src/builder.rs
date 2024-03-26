@@ -694,7 +694,8 @@ fn build_with_store_internal(
 	// for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
-	user_config.manually_accept_inbound_channels = true;
+	// #SPLICING TODO disable manual accept
+	user_config.manually_accept_inbound_channels = false; // true
 	// Note the channel_handshake_config will be overwritten in `connect_open_channel`, but we
 	// still set a default here.
 	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =

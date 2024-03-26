@@ -24,6 +24,7 @@ use lightning::events::{ClosureReason, PaymentPurpose};
 use lightning::events::{Event as LdkEvent, PaymentFailureReason};
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::features::ChannelTypeFeatures;
 use lightning::ln::{ChannelId, PaymentHash};
 // use lightning::offers::offer::Amount;
 use lightning::routing::gossip::NodeId;
@@ -34,7 +35,7 @@ use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::OutPoint;
+use bitcoin::{OutPoint, Sequence};
 
 use rand::{thread_rng, Rng};
 
@@ -428,6 +429,90 @@ where
 					},
 				}
 			},
+			// Channel open V2 (dual funding)
+			LdkEvent::FundingInputsContributionReady {
+				channel_id,
+				counterparty_node_id,
+				holder_funding_satoshis,
+				counterparty_funding_satoshis,
+				user_channel_id: _,
+				..
+			} => {
+				log_debug!(self.logger, "FundingInputsContributionReady  funding ours {}  theirs {}  channel id {}  node id {}",
+					holder_funding_satoshis, counterparty_funding_satoshis, channel_id, counterparty_node_id);
+
+				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+				// Get some inputs to fund this transaction.
+				match self.wallet.prepare_funding_inputs(holder_funding_satoshis, confirmation_target) {
+					Err(e) => {
+						log_error!(self.logger, "Failed to prepare inputs for funding transaction: {}", e);
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&channel_id,
+								&counterparty_node_id,
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to force close channel after funding input preparation failed: {:?}", e);
+								panic!(
+									"Failed to force close channel after funding input preparation failed"
+								);
+							});
+					}
+					Ok(mut funding_inputs) => {
+						// Reset sequence to 0 on the inputs
+						for i in &mut funding_inputs {
+							i.0.sequence = Sequence::ZERO;
+						}
+
+						match self.channel_manager.contribute_funding_inputs(&channel_id, &counterparty_node_id, funding_inputs.clone()) {
+							Err(e) => {
+								log_error!(self.logger, "Error from contribute_funding_inputs, {:?}", e);
+							}
+							Ok(_) => {
+								log_info!(self.logger, "Contributed {} inputs to the funding transaction", funding_inputs.len());
+							}
+						}
+					}
+				}
+			}
+			// Channel open V2 (dual funding)
+			LdkEvent::FundingTransactionReadyForSigning {
+				channel_id,
+				counterparty_node_id,
+				user_channel_id: _,
+				unsigned_transaction,
+				..
+			} => {
+				log_debug!(self.logger, "FundingTransactionReadyForSigning  channel id {}  node id {}  tx {:?}",
+					channel_id, counterparty_node_id, unsigned_transaction);
+
+				match self.wallet.sign_transaction(unsigned_transaction) {
+					Err(e) => {
+						log_error!(self.logger, "Failed to sign funding transaction: {}", e);
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&channel_id,
+								&counterparty_node_id,
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to force close channel after funding signing failed: {:?}", e);
+								panic!(
+									"Failed to force close channel after funding signing failed"
+								);
+							});
+					}
+					Ok(signed_tx) => {
+						match self.channel_manager.funding_transaction_signed(&channel_id, &counterparty_node_id, signed_tx) {
+							Err(e) => {
+								log_error!(self.logger, "Error from signed V2 funding transaction (funding_transaction_signed)! {:?}", e);
+							}
+							Ok(_) => {
+								log_info!(self.logger, "V2 funding transaction signed.");
+							}
+						}		
+					}
+				}
+			}
 			LdkEvent::PaymentClaimable {
 				payment_hash,
 				purpose,
@@ -741,6 +826,7 @@ where
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
 				self.output_sweeper.add_outputs(outputs, channel_id)
 			},
+			// Channel open 'manual' accept
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
 				counterparty_node_id,
@@ -748,105 +834,16 @@ where
 				channel_type,
 				push_msat: _,
 			} => {
-				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
-
-				if anchor_channel {
-					if let Some(anchor_channels_config) =
-						self.config.anchor_channels_config.as_ref()
-					{
-						let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
-							&self.channel_manager,
-							&self.config,
-						);
-						let spendable_amount_sats = self
-							.wallet
-							.get_balances(cur_anchor_reserve_sats)
-							.map(|(_, s)| s)
-							.unwrap_or(0);
-
-						let required_amount_sats = if anchor_channels_config
-							.trusted_peers_no_reserve
-							.contains(&counterparty_node_id)
-						{
-							0
-						} else {
-							anchor_channels_config.per_channel_reserve_sats
-						};
-
-						if spendable_amount_sats < required_amount_sats {
-							log_error!(
-							self.logger,
-							"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves.",
-							counterparty_node_id,
-						);
-							self.channel_manager
-								.force_close_without_broadcasting_txn(
-									&temporary_channel_id,
-									&counterparty_node_id,
-								)
-								.unwrap_or_else(|e| {
-									log_error!(self.logger, "Failed to reject channel: {:?}", e)
-								});
-							return;
-						}
-					} else {
-						log_error!(
-							self.logger,
-							"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
-							counterparty_node_id,
-						);
-						self.channel_manager
-							.force_close_without_broadcasting_txn(
-								&temporary_channel_id,
-								&counterparty_node_id,
-							)
-							.unwrap_or_else(|e| {
-								log_error!(self.logger, "Failed to reject channel: {:?}", e)
-							});
-						return;
-					}
-				}
-
-				let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
-				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
-				let res = if allow_0conf {
-					self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
-						&temporary_channel_id,
-						&counterparty_node_id,
-						user_channel_id,
-					)
-				} else {
-					self.channel_manager.accept_inbound_channel(
-						&temporary_channel_id,
-						&counterparty_node_id,
-						user_channel_id,
-					)
-				};
-
-				match res {
-					Ok(()) => {
-						log_info!(
-							self.logger,
-							"Accepting inbound{}{} channel of {}sats from{} peer {}",
-							if allow_0conf { " 0conf" } else { "" },
-							if anchor_channel { " Anchor" } else { "" },
-							funding_satoshis,
-							if allow_0conf { " trusted" } else { "" },
-							counterparty_node_id,
-						);
-					},
-					Err(e) => {
-						log_error!(
-							self.logger,
-							"Error while accepting inbound{}{} channel from{} peer {}: {:?}",
-							if allow_0conf { " 0conf" } else { "" },
-							if anchor_channel { " Anchor" } else { "" },
-							counterparty_node_id,
-							if allow_0conf { " trusted" } else { "" },
-							e,
-						);
-					},
-				}
+				self.handle_open_channel_request(temporary_channel_id, counterparty_node_id, funding_satoshis, channel_type);
+			},
+			// V2 channel open 'manual' accept
+			LdkEvent::OpenChannelV2Request {
+				temporary_channel_id,
+				counterparty_node_id,
+				funding_satoshis,
+				channel_type,
+			} => {
+				self.handle_open_channel_request(temporary_channel_id, counterparty_node_id, funding_satoshis, channel_type);
 			},
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
@@ -1123,19 +1120,118 @@ where
 					});
 				}
 			},
-			lightning::events::Event::OpenChannelV2Request { .. } => {
-				log_info!(self.logger, "OpenChannelV2Request");
-			}
-			lightning::events::Event::FundingInputsContributionReady { .. } => {
-				log_info!(self.logger, "FundingInputsContributionReady");
-			}
-			lightning::events::Event::FundingTransactionReadyForSigning { .. } => {
-				log_info!(self.logger, "FundingTransactionReadyForSigning");
-			}
 			// #SPLICING
-			lightning::events::Event::SpliceAckedInputsContributionReady { .. } => {
+			LdkEvent::SpliceAckedInputsContributionReady { .. } => {
 				log_info!(self.logger, "SpliceAckedInputsContributionReady");
 			}
+		}
+	}
+
+	fn handle_open_channel_request(
+		&self,
+		temporary_channel_id: ChannelId,
+		counterparty_node_id: PublicKey,
+		funding_satoshis: u64,
+		channel_type: ChannelTypeFeatures,
+	) {
+		let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+
+		if anchor_channel {
+			if let Some(anchor_channels_config) =
+				self.config.anchor_channels_config.as_ref()
+			{
+				let cur_anchor_reserve_sats = crate::total_anchor_channels_reserve_sats(
+					&self.channel_manager,
+					&self.config,
+				);
+				let spendable_amount_sats = self
+					.wallet
+					.get_balances(cur_anchor_reserve_sats)
+					.map(|(_, s)| s)
+					.unwrap_or(0);
+
+				let required_amount_sats = if anchor_channels_config
+					.trusted_peers_no_reserve
+					.contains(&counterparty_node_id)
+				{
+					0
+				} else {
+					anchor_channels_config.per_channel_reserve_sats
+				};
+
+				if spendable_amount_sats < required_amount_sats {
+					log_error!(
+					self.logger,
+					"Rejecting inbound Anchor channel from peer {} due to insufficient available on-chain reserves.",
+					counterparty_node_id,
+				);
+					self.channel_manager
+						.force_close_without_broadcasting_txn(
+							&temporary_channel_id,
+							&counterparty_node_id,
+						)
+						.unwrap_or_else(|e| {
+							log_error!(self.logger, "Failed to reject channel: {:?}", e)
+						});
+					return;
+				}
+			} else {
+				log_error!(
+					self.logger,
+					"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
+					counterparty_node_id,
+				);
+				self.channel_manager
+					.force_close_without_broadcasting_txn(
+						&temporary_channel_id,
+						&counterparty_node_id,
+					)
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to reject channel: {:?}", e)
+					});
+				return;
+			}
+		}
+
+		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
+		let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
+		let res = if allow_0conf {
+			self.channel_manager.accept_inbound_channel_from_trusted_peer_0conf(
+				&temporary_channel_id,
+				&counterparty_node_id,
+				user_channel_id,
+			)
+		} else {
+			self.channel_manager.accept_inbound_channel(
+				&temporary_channel_id,
+				&counterparty_node_id,
+				user_channel_id,
+			)
+		};
+
+		match res {
+			Ok(()) => {
+				log_info!(
+					self.logger,
+					"Accepting inbound{}{} channel of {}sats from{} peer {}",
+					if allow_0conf { " 0conf" } else { "" },
+					if anchor_channel { " Anchor" } else { "" },
+					funding_satoshis,
+					if allow_0conf { " trusted" } else { "" },
+					counterparty_node_id,
+				);
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Error while accepting inbound{}{} channel from{} peer {}: {:?}",
+					if allow_0conf { " 0conf" } else { "" },
+					if anchor_channel { " Anchor" } else { "" },
+					counterparty_node_id,
+					if allow_0conf { " trusted" } else { "" },
+					e,
+				);
+			},
 		}
 	}
 }

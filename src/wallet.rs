@@ -31,7 +31,7 @@ use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
-use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
+use bitcoin::{ScriptBuf, Transaction, TxOut, Txid, TxIn};
 
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
@@ -164,6 +164,69 @@ where
 		Ok(psbt.extract_tx())
 	}
 
+	/// Prepare inputs for a funding transaction, to cover given output amount
+	pub(crate) fn prepare_funding_inputs(
+		&self, value_sats: u64, confirmation_target: ConfirmationTarget,
+	) -> Result<Vec<(TxIn, Transaction)>, Error> {
+		let fee_rate = FeeRate::from_sat_per_kwu(
+			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
+		);
+		let dummy_pkubkey = bitcoin::PublicKey::from_slice(&[2; 33]).unwrap();
+		let dummy_pk_hash = dummy_pkubkey.wpubkey_hash().ok_or(Error::InvalidPublicKey)?;
+		let dummy_output_script = ScriptBuf::new_v0_p2wpkh(&dummy_pk_hash);
+
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut tx_builder = locked_wallet.build_tx();
+
+		tx_builder
+			.add_recipient(dummy_output_script, value_sats)
+			.fee_rate(fee_rate)
+			.nlocktime(LockTime::ZERO);
+
+		let psbt = match tx_builder.finish() {
+			Ok((psbt, _)) => {
+				log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create funding transaction: {}", err);
+				return Err(err.into());
+			},
+		};
+
+		let inputs = psbt.extract_tx().input;
+
+		// Retrieve all input transaction
+		let mut res: Vec<(TxIn, Transaction)> = Vec::new();
+		for i in &inputs {
+			if let Some(tx_details) = locked_wallet.get_tx(&i.previous_output.txid, true)? {
+				if let Some(tx) = tx_details.transaction {
+					res.push((i.clone(), tx));
+				}
+			}
+		}
+
+		Ok(res)
+	}
+
+	/// Sign a dual funding (V2) negotiated transaction
+	pub(crate) fn sign_transaction(&self, unsigned_transaction: Transaction) -> Result<Transaction, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut psbt = PartiallySignedTransaction::from_unsigned_tx(unsigned_transaction).map_err(|_| Error::OnchainTxSigningFailed)?;
+		// Fill the input transactions
+		for idx in 0..psbt.unsigned_tx.input.len() {
+			if let Some(tx_details) = locked_wallet.get_tx(&psbt.unsigned_tx.input[idx].previous_output.txid, true)? {
+				if let Some(tx) = tx_details.transaction {
+					if idx < psbt.inputs.len() {
+						psbt.inputs[idx].non_witness_utxo = Some(tx);
+					}
+				}
+			}
+		}
+		let _finalized = locked_wallet.sign(&mut psbt, SignOptions::default()).map_err(|_| Error::OnchainTxSigningFailed)?;
+		Ok(psbt.extract_tx())
+	}
+	
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let address_info = self.inner.lock().unwrap().get_address(AddressIndex::New)?;
 		Ok(address_info.address)

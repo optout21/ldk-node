@@ -37,7 +37,7 @@ fn main() {
 
 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-	node.connect_open_channel(node_id, node_addr, 10000, None, None, false).unwrap();
+	node.connect_open_channel(node_id, node_addr, 10000, None, None, false, false).unwrap();
 
 	let event = node.wait_next_event();
 	println!("EVENT: {:?}", event);

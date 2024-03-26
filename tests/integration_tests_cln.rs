@@ -82,6 +82,7 @@ fn test_cln() {
 		Some(500_000_000),
 		None,
 		false,
+		false,
 	)
 	.unwrap();
 

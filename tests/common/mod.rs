@@ -349,6 +349,7 @@ pub fn open_channel(
 			None,
 			None,
 			announce,
+			false,
 		)
 		.unwrap();
 	assert!(node_a.list_peers().iter().find(|c| { c.node_id == node_b.node_id() }).is_some());
@@ -394,6 +395,7 @@ pub(crate) fn do_channel_full_cycle<E: ElectrumApi>(
 			Some(push_msat),
 			None,
 			true,
+			false,
 		)
 		.unwrap();
 
