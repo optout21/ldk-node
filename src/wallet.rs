@@ -31,7 +31,7 @@ use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
-use bitcoin::{ScriptBuf, Transaction, TxOut, Txid, TxIn};
+use bitcoin::{ScriptBuf, Transaction, TxOut, Txid, TxIn, Witness};
 
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
@@ -211,20 +211,66 @@ where
 
 	/// Sign a dual funding (V2) negotiated transaction
 	pub(crate) fn sign_transaction(&self, unsigned_transaction: Transaction) -> Result<Transaction, Error> {
+		let psbt = PartiallySignedTransaction::from_unsigned_tx(unsigned_transaction.clone())
+			.map_err(|_err| Error::OnchainTxSigningFailed)?;
+		let res = self.sign_psbt(psbt, true)?;
+		Ok(res.extract_tx())
+	}
+
+	/// Sign a transaction, which is in fact a PSBT. For already signed inputs with witnesses, just preserve the witnesses.
+	/// This is a workaround, it should not be used, but sign_psbt directly, with a PSBT input.
+	pub(crate) fn sign_partial_transaction(&self, unsigned_partial_transaction: Transaction) -> Result<Transaction, Error> {
+		let mut to_sign = unsigned_partial_transaction.clone();
+		// If there are inputs that are already signed (have witness), remove the witnesses and save them for later
+		let mut saved_witnesses: Vec<Option<Witness>> = Vec::with_capacity(to_sign.input.len());
+		saved_witnesses.resize(to_sign.input.len(), None);
+		for i in 0..to_sign.input.len() {
+			if to_sign.input[i].witness.len() > 0 {
+				saved_witnesses[i] = Some(to_sign.input[i].witness.clone());
+				to_sign.input[i].witness = Witness::new();
+			}
+		}
+
+		// sign
+		let res = self.sign_transaction(to_sign)?;
+
+		// Put back saved witnesses
+		let mut res2 = res.clone();
+		for i in 0..res2.input.len() {
+			if i < saved_witnesses.len() {
+				if let Some(w) = &saved_witnesses[i] {
+					res2.input[i].witness = w.clone();
+				}
+			}
+		}
+
+		Ok(res2)
+	}
+
+	pub(crate) fn sign_psbt(&self, psbt: PartiallySignedTransaction, fill_input_txos: bool) -> Result<PartiallySignedTransaction, Error> {
 		let locked_wallet = self.inner.lock().unwrap();
-		let mut psbt = PartiallySignedTransaction::from_unsigned_tx(unsigned_transaction).map_err(|_| Error::OnchainTxSigningFailed)?;
-		// Fill the input transactions
-		for idx in 0..psbt.unsigned_tx.input.len() {
-			if let Some(tx_details) = locked_wallet.get_tx(&psbt.unsigned_tx.input[idx].previous_output.txid, true)? {
-				if let Some(tx) = tx_details.transaction {
-					if idx < psbt.inputs.len() {
-						psbt.inputs[idx].non_witness_utxo = Some(tx);
+		let mut result = psbt.clone();
+
+		if fill_input_txos {
+			for idx in 0..result.inputs.len() {
+				if idx < result.unsigned_tx.input.len() {
+					let prev_out = result.unsigned_tx.input[idx].previous_output;
+					let txd = locked_wallet.get_tx(&result.unsigned_tx.input[idx].previous_output.txid, true)?;
+					if let Some(txd) = txd {
+						if let Some(tx) = txd.transaction {
+							if (prev_out.vout as usize) < tx.output.len() {
+								result.inputs[idx].witness_utxo = Some(tx.output[prev_out.vout as usize].clone());
+							}
+						}
 					}
 				}
 			}
 		}
-		let _finalized = locked_wallet.sign(&mut psbt, SignOptions::default()).map_err(|_| Error::OnchainTxSigningFailed)?;
-		Ok(psbt.extract_tx())
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+		let _finalized = locked_wallet.sign(&mut result, sign_options).map_err(|_| Error::OnchainTxSigningFailed)?;
+		Ok(result)
 	}
 	
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {

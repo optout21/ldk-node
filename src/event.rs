@@ -486,7 +486,7 @@ where
 				log_debug!(self.logger, "FundingTransactionReadyForSigning  channel id {}  node id {}  tx {:?}",
 					channel_id, counterparty_node_id, unsigned_transaction);
 
-				match self.wallet.sign_transaction(unsigned_transaction) {
+				match self.wallet.sign_partial_transaction(unsigned_transaction) {
 					Err(e) => {
 						log_error!(self.logger, "Failed to sign funding transaction: {}", e);
 						self.channel_manager
@@ -1121,8 +1121,50 @@ where
 				}
 			},
 			// #SPLICING
-			LdkEvent::SpliceAckedInputsContributionReady { .. } => {
-				log_info!(self.logger, "SpliceAckedInputsContributionReady");
+			LdkEvent::SpliceAckedInputsContributionReady {
+				channel_id,
+				counterparty_node_id,
+				pre_channel_value_satoshis,
+				post_channel_value_satoshis,
+				holder_funding_satoshis,
+				counterparty_funding_satoshis,
+			} => {
+				log_info!(self.logger, "SpliceAckedInputsContributionReady  value pre/post {} {}  funding ours {}  theirs {}  channel id {}  node id {}",
+					pre_channel_value_satoshis, post_channel_value_satoshis, holder_funding_satoshis, counterparty_funding_satoshis, channel_id, counterparty_node_id);
+
+				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+				// Get some inputs to fund this transaction.
+				match self.wallet.prepare_funding_inputs(holder_funding_satoshis, confirmation_target) {
+					Err(e) => {
+						log_error!(self.logger, "Failed to prepare inputs for splice transaction: {}", e);
+						self.channel_manager
+							.force_close_without_broadcasting_txn(
+								&channel_id,
+								&counterparty_node_id,
+							)
+							.unwrap_or_else(|e| {
+								log_error!(self.logger, "Failed to force close channel after splice input preparation failed: {:?}", e);
+								panic!(
+									"Failed to force close channel after splice input preparation failed"
+								);
+							});
+					}
+					Ok(mut funding_inputs) => {
+						// Reset sequence to 0 on the inputs
+						for i in &mut funding_inputs {
+							i.0.sequence = Sequence::ZERO;
+						}
+	
+						match self.channel_manager.contribute_funding_inputs(&channel_id, &counterparty_node_id, funding_inputs.clone()) {
+							Err(e) => {
+								log_error!(self.logger, "Error from contribute_funding_inputs, splice, {:?}", e);
+							}
+							Ok(_) => {
+								log_info!(self.logger, "Contributed {} inputs to the splice transaction", funding_inputs.len());
+							}
+						}
+					}
+				}
 			}
 		}
 	}
