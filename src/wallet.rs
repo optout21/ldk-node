@@ -4,6 +4,7 @@ use crate::Error;
 
 use lightning::chain::chaininterface::{BroadcasterInterface, ConfirmationTarget, FeeEstimator};
 
+use lightning::events::bump_transaction::{Utxo, WalletSource};
 use lightning::ln::msgs::{DecodeError, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::sign::{
@@ -19,12 +20,20 @@ use bdk::wallet::AddressIndex;
 use bdk::FeeRate;
 use bdk::{SignOptions, SyncOptions};
 
+use bitcoin::address::{Payload, WitnessVersion};
 use bitcoin::bech32::u5;
+use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
+use bitcoin::hash_types::WPubkeyHash;
+use bitcoin::hashes::Hash;
+use bitcoin::key::XOnlyPublicKey;
+use bitcoin::psbt::PartiallySignedTransaction;
 use bitcoin::secp256k1::ecdh::SharedSecret;
 use bitcoin::secp256k1::ecdsa::{RecoverableSignature, Signature};
 use bitcoin::secp256k1::{PublicKey, Scalar, Secp256k1, SecretKey, Signing};
 use bitcoin::{ScriptBuf, Transaction, TxOut, Txid};
+#[cfg(any(dual_funding, splicing))]
+use bitcoin::{TxIn, Witness};
 
 use std::ops::Deref;
 use std::sync::{Arc, Condvar, Mutex};
@@ -157,6 +166,119 @@ where
 		Ok(psbt.extract_tx())
 	}
 
+	/// Prepare inputs for a funding transaction, to cover given output amount
+	#[cfg(any(dual_funding, splicing))]
+	pub(crate) fn prepare_funding_inputs(
+		&self, value_sats: u64, confirmation_target: ConfirmationTarget,
+	) -> Result<Vec<(TxIn, Transaction)>, Error> {
+		let fee_rate = FeeRate::from_sat_per_kwu(
+			self.fee_estimator.get_est_sat_per_1000_weight(confirmation_target) as f32,
+		);
+		let dummy_pkubkey = bitcoin::PublicKey::from_slice(&[2; 33]).unwrap();
+		let dummy_pk_hash = dummy_pkubkey.wpubkey_hash().ok_or(Error::InvalidPublicKey)?;
+		let dummy_output_script = ScriptBuf::new_v0_p2wpkh(&dummy_pk_hash);
+
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut tx_builder = locked_wallet.build_tx();
+
+		tx_builder
+			.add_recipient(dummy_output_script, value_sats)
+			.fee_rate(fee_rate)
+			.nlocktime(LockTime::ZERO);
+
+		let psbt = match tx_builder.finish() {
+			Ok((psbt, _)) => {
+				log_trace!(self.logger, "Created funding PSBT: {:?}", psbt);
+				psbt
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to create funding transaction: {}", err);
+				return Err(err.into());
+			},
+		};
+
+		let inputs = psbt.extract_tx().input;
+
+		// Retrieve all input transaction
+		let mut res: Vec<(TxIn, Transaction)> = Vec::new();
+		for i in &inputs {
+			if let Some(tx_details) = locked_wallet.get_tx(&i.previous_output.txid, true)? {
+				if let Some(tx) = tx_details.transaction {
+					res.push((i.clone(), tx));
+				}
+			}
+		}
+
+		Ok(res)
+	}
+
+	/// Sign a dual funding (V2) negotiated transaction
+	#[cfg(any(dual_funding, splicing))]
+	pub(crate) fn sign_transaction(&self, unsigned_transaction: Transaction) -> Result<Transaction, Error> {
+		let psbt = PartiallySignedTransaction::from_unsigned_tx(unsigned_transaction.clone())
+			.map_err(|_err| Error::OnchainTxSigningFailed)?;
+		let res = self.sign_psbt(psbt, true)?;
+		Ok(res.extract_tx())
+	}
+
+	/// Sign a transaction, which is in fact a PSBT. For already signed inputs with witnesses, just preserve the witnesses.
+	/// This is a workaround, it should not be used, but sign_psbt directly, with a PSBT input.
+	#[cfg(any(dual_funding, splicing))]
+	pub(crate) fn sign_partial_transaction(&self, unsigned_partial_transaction: Transaction) -> Result<Transaction, Error> {
+		let mut to_sign = unsigned_partial_transaction.clone();
+		// If there are inputs that are already signed (have witness), remove the witnesses and save them for later
+		let mut saved_witnesses: Vec<Option<Witness>> = Vec::with_capacity(to_sign.input.len());
+		saved_witnesses.resize(to_sign.input.len(), None);
+		for i in 0..to_sign.input.len() {
+			if to_sign.input[i].witness.len() > 0 {
+				saved_witnesses[i] = Some(to_sign.input[i].witness.clone());
+				to_sign.input[i].witness = Witness::new();
+			}
+		}
+
+		// sign
+		let res = self.sign_transaction(to_sign)?;
+
+		// Put back saved witnesses
+		let mut res2 = res.clone();
+		for i in 0..res2.input.len() {
+			if i < saved_witnesses.len() {
+				if let Some(w) = &saved_witnesses[i] {
+					res2.input[i].witness = w.clone();
+				}
+			}
+		}
+
+		Ok(res2)
+	}
+
+	#[cfg(any(dual_funding, splicing))]
+	pub(crate) fn sign_psbt(&self, psbt: PartiallySignedTransaction, fill_input_txos: bool) -> Result<PartiallySignedTransaction, Error> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut result = psbt.clone();
+
+		if fill_input_txos {
+			for idx in 0..result.inputs.len() {
+				if idx < result.unsigned_tx.input.len() {
+					let prev_out = result.unsigned_tx.input[idx].previous_output;
+					let txd = locked_wallet.get_tx(&result.unsigned_tx.input[idx].previous_output.txid, true)?;
+					if let Some(txd) = txd {
+						if let Some(tx) = txd.transaction {
+							if (prev_out.vout as usize) < tx.output.len() {
+								result.inputs[idx].witness_utxo = Some(tx.output[prev_out.vout as usize].clone());
+							}
+						}
+					}
+				}
+			}
+		}
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+		let _finalized = locked_wallet.sign(&mut result, sign_options).map_err(|_| Error::OnchainTxSigningFailed)?;
+		Ok(result)
+	}
+
 	pub(crate) fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
 		let address_info = self.inner.lock().unwrap().get_address(AddressIndex::New)?;
 		Ok(address_info.address)
@@ -242,6 +364,118 @@ where
 		}
 
 		Ok(txid)
+	}
+}
+
+impl<D, B: Deref, E: Deref, L: Deref> WalletSource for Wallet<D, B, E, L>
+where
+	D: BatchDatabase,
+	B::Target: BroadcasterInterface,
+	E::Target: FeeEstimator,
+	L::Target: Logger,
+{
+	fn list_confirmed_utxos(&self) -> Result<Vec<Utxo>, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let mut utxos = Vec::new();
+		let confirmed_txs: Vec<bdk::TransactionDetails> = locked_wallet
+			.list_transactions(false)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve transactions from wallet: {}", e);
+			})?
+			.into_iter()
+			.filter(|t| t.confirmation_time.is_some())
+			.collect();
+		let unspent_confirmed_utxos = locked_wallet
+			.list_unspent()
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to retrieve unspent transactions from wallet: {}",
+					e
+				);
+			})?
+			.into_iter()
+			.filter(|u| confirmed_txs.iter().find(|t| t.txid == u.outpoint.txid).is_some());
+
+		for u in unspent_confirmed_utxos {
+			let payload = Payload::from_script(&u.txout.script_pubkey).map_err(|e| {
+				log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+			})?;
+
+			match payload {
+				Payload::WitnessProgram(program) => match program.version() {
+					WitnessVersion::V0 if program.program().len() == 20 => {
+						let wpkh =
+							WPubkeyHash::from_slice(program.program().as_bytes()).map_err(|e| {
+								log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+							})?;
+						let utxo = Utxo::new_v0_p2wpkh(u.outpoint, u.txout.value, &wpkh);
+						utxos.push(utxo);
+					},
+					WitnessVersion::V1 => {
+						XOnlyPublicKey::from_slice(program.program().as_bytes()).map_err(|e| {
+							log_error!(self.logger, "Failed to retrieve script payload: {}", e);
+						})?;
+
+						let utxo = Utxo {
+							outpoint: u.outpoint,
+							output: TxOut {
+								value: u.txout.value,
+								script_pubkey: ScriptBuf::new_witness_program(&program),
+							},
+							satisfaction_weight: 1 /* empty script_sig */ * WITNESS_SCALE_FACTOR as u64 +
+								1 /* witness items */ + 1 /* schnorr sig len */ + 64, /* schnorr sig */
+						};
+						utxos.push(utxo);
+					},
+					_ => {
+						log_error!(
+							self.logger,
+							"Unexpected witness version or length. Version: {}, Length: {}",
+							program.version(),
+							program.program().len()
+						);
+					},
+				},
+				_ => {
+					log_error!(
+						self.logger,
+						"Tried to use a non-witness script. This must never happen."
+					);
+					panic!("Tried to use a non-witness script. This must never happen.");
+				},
+			}
+		}
+
+		Ok(utxos)
+	}
+
+	fn get_change_script(&self) -> Result<ScriptBuf, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+		let address_info = locked_wallet.get_address(AddressIndex::New).map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		})?;
+
+		Ok(address_info.address.script_pubkey())
+	}
+
+	fn sign_psbt(&self, mut psbt: PartiallySignedTransaction) -> Result<Transaction, ()> {
+		let locked_wallet = self.inner.lock().unwrap();
+
+		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			Ok(finalized) => {
+				if !finalized {
+					log_error!(self.logger, "Failed to finalize PSBT.");
+					return Err(());
+				}
+			},
+			Err(err) => {
+				log_error!(self.logger, "Failed to sign transaction: {}", err);
+				return Err(());
+			},
+		}
+
+		Ok(psbt.extract_tx())
 	}
 }
 
