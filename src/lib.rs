@@ -139,6 +139,8 @@ pub use types::{ChannelDetails, PeerDetails, UserChannelId};
 use logger::{log_error, log_info, log_trace, FilesystemLogger, Logger};
 
 use lightning::chain::{BestBlock, Confirm};
+#[cfg(any(dual_funding, splicing))]
+use lightning::chain::chaininterface::ConfirmationTarget;
 use lightning::ln::channelmanager::{self, PaymentId, RecipientOnionFields, Retry};
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
@@ -929,6 +931,8 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<Arc<ChannelConfig>>,
 		announce_channel: bool,
+		#[cfg(any(dual_funding, splicing))]
+		use_v2: bool,
 	) -> Result<UserChannelId, Error> {
 		let rt_lock = self.runtime.read().unwrap();
 		if rt_lock.is_none() {
@@ -971,14 +975,35 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		let push_msat = push_to_counterparty_msat.unwrap_or(0);
 		let user_channel_id: u128 = rand::thread_rng().gen::<u128>();
 
-		match self.channel_manager.create_channel(
+		#[cfg(not(any(dual_funding, splicing)))]
+		let res = self.channel_manager.create_channel(
 			peer_info.node_id,
 			channel_amount_sats,
 			push_msat,
 			user_channel_id,
 			None,
 			Some(user_config),
-		) {
+		);
+		#[cfg(any(dual_funding, splicing))]
+		let res = if !use_v2 {
+			self.channel_manager.create_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				push_msat,
+				user_channel_id,
+				None,
+				Some(user_config),
+			)
+		} else {
+			self.channel_manager.create_dual_funded_channel(
+				peer_info.node_id,
+				channel_amount_sats,
+				Some(ConfirmationTarget::OnChainSweep),
+				user_channel_id,
+				Some(user_config),
+			)
+		};
+		match res {
 			Ok(_) => {
 				log_info!(
 					self.logger,
