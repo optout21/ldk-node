@@ -1,6 +1,6 @@
 [package]
 name = "ldk-node"
-version = "0.2.1"
+version = "0.2.1-splice"
 authors = ["Elias Rohrer <dev@tnull.de>"]
 homepage = "https://lightningdevkit.org/"
 license = "MIT OR Apache-2.0"
@@ -35,9 +35,7 @@ lightning-persister = { version = "0.0.123-beta" }
 lightning-background-processor = { version = "0.0.123-beta", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.123-beta" }
 lightning-transaction-sync = { version = "0.0.123-beta", features = ["esplora-async-https", "time"] }
-#lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
-
-lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", rev = "abf7088c0e03221c0f122e797f34802c9e99a3d4", features = ["std"] }
+lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -48,14 +46,14 @@ lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", re
 #lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["esplora-async"] }
 #lightning-liquidity = { git = "https://github.com/lightningdevkit/lightning-liquidity", branch="main", features = ["std"] }
 
-#lightning = { path = "../rust-lightning/lightning", features = ["std"] }
-#lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
-#lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
-#lightning-persister = { path = "../rust-lightning/lightning-persister" }
-#lightning-background-processor = { path = "../rust-lightning/lightning-background-processor", features = ["futures"] }
-#lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
-#lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync", features = ["esplora-async"] }
-#lightning-liquidity = { path = "../lightning-liquidity", features = ["std"] }
+#lightning = { path = "../rust-lighting/lightning", features = ["std"] }
+#lightning-invoice = { path = "../rust-lighting/lightning-invoice" }
+#lightning-net-tokio = { path = "../rust-lighting/lightning-net-tokio" }
+#lightning-persister = { path = "../rust-lighting/lightning-persister" }
+#lightning-background-processor = { path = "../rust-lighting/lightning-background-processor", features = ["futures"] }
+#lightning-rapid-gossip-sync = { path = "../rust-lighting/lightning-rapid-gossip-sync" }
+#lightning-transaction-sync = { path = "../rust-lighting/lightning-transaction-sync", features = ["esplora-async"] }
+#lightning-liquidity = { path = "../lightning-liquidity/", features = ["std"] }
 
 bdk = { version = "0.29.0", default-features = false, features = ["std", "async-interface", "use-esplora-async", "sqlite-bundled", "keys-bip39"]}
 
@@ -82,6 +80,8 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 lightning = { version = "0.0.123-beta", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
+#lightning = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["std", "_test_utils"] }
+#lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"

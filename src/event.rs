@@ -708,7 +708,7 @@ where
 				}
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id } => {
-				self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None)
+				self.output_sweeper.track_spendable_outputs(outputs, channel_id, true, None).expect("Failure from track_spendable_outputs")
 			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
