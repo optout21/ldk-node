@@ -712,6 +712,14 @@ fn build_with_store_internal<K: KVStore + Sync + Send + 'static>(
 			100;
 	}
 
+	// #SPLICING
+	// Splicing, testing settings  TODO review/remove
+	user_config.channel_handshake_config.minimum_depth = 2; // for faster testing, TODO remove
+	user_config.channel_handshake_config.max_inbound_htlc_value_in_flight_percent_of_channel = 90; // allow larger payments, TODO remove
+	// disable manual accept, TODO fix, TODO remove
+	user_config.manually_accept_inbound_channels = false;
+
+
 	// Initialize the ChannelManager
 	let channel_manager = {
 		if let Ok(res) = kv_store.read(
