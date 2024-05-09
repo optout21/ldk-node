@@ -82,6 +82,9 @@ pub enum Event {
 		counterparty_node_id: PublicKey,
 		/// The outpoint of the channel's funding transaction.
 		funding_txo: OutPoint,
+		/// True if the channel is pending as part of a splicing process.
+		/// Note: for persistence reasons this field is included non-conditionally, #[cfg(splicing)]. TODO: remove this comment once cfg(splicing) is removed.
+		is_splice: bool,
 	},
 	/// A channel is ready to be used.
 	ChannelReady {
@@ -93,6 +96,9 @@ pub enum Event {
 		///
 		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
 		counterparty_node_id: Option<PublicKey>,
+		/// True if the channel is pending as part of a splicing process.
+		/// Note: for persistence reasons this field is included non-conditionally, #[cfg(splicing)]. TODO: remove this comment once cfg(splicing) is removed.
+		is_splice: bool,
 	},
 	/// A channel has been closed.
 	ChannelClosed {
@@ -126,6 +132,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(0, channel_id, required),
 		(1, counterparty_node_id, option),
 		(2, user_channel_id, required),
+		(4, is_splice, required),
 	},
 	(4, ChannelPending) => {
 		(0, channel_id, required),
@@ -133,6 +140,7 @@ impl_writeable_tlv_based_enum!(Event,
 		(4, former_temporary_channel_id, required),
 		(6, counterparty_node_id, required),
 		(8, funding_txo, required),
+		(10, is_splice, required),
 	},
 	(5, ChannelClosed) => {
 		(0, channel_id, required),
@@ -885,6 +893,7 @@ where
 				former_temporary_channel_id,
 				counterparty_node_id,
 				funding_txo,
+				is_splice,
 				..
 			} => {
 				log_info!(
@@ -900,6 +909,7 @@ where
 						former_temporary_channel_id: former_temporary_channel_id.unwrap(),
 						counterparty_node_id,
 						funding_txo,
+						is_splice,
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
@@ -938,7 +948,7 @@ where
 				}
 			},
 			LdkEvent::ChannelReady {
-				channel_id, user_channel_id, counterparty_node_id, ..
+				channel_id, user_channel_id, counterparty_node_id, is_splice, ..
 			} => {
 				log_info!(
 					self.logger,
@@ -951,6 +961,7 @@ where
 						channel_id,
 						user_channel_id: UserChannelId(user_channel_id),
 						counterparty_node_id: Some(counterparty_node_id),
+						is_splice,
 					})
 					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
