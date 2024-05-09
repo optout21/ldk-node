@@ -78,6 +78,7 @@
 mod balance;
 mod builder;
 mod config;
+mod connection;
 mod error;
 mod event;
 mod fee_estimator;
@@ -124,6 +125,7 @@ use config::{
 	LDK_PAYMENT_RETRY_TIMEOUT, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RGS_SYNC_INTERVAL, WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
+use connection::ConnectionManager;
 use event::{EventHandler, EventQueue};
 use gossip::GossipSource;
 use liquidity::LiquiditySource;
@@ -131,7 +133,7 @@ use payment_store::PaymentStore;
 pub use payment_store::{LSPFeeLimits, PaymentDetails, PaymentDirection, PaymentStatus};
 use peer_store::{PeerInfo, PeerStore};
 use types::{
-	Broadcaster, ChainMonitor, ChannelManager, FeeEstimator, KeysManager, NetworkGraph,
+	Broadcaster, ChainMonitor, ChannelManager, DynStore, FeeEstimator, KeysManager, NetworkGraph,
 	PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, PeerDetails, UserChannelId};
@@ -146,8 +148,6 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::ln::{PaymentHash, PaymentPreimage};
 
 use lightning::sign::EntropySource;
-
-use lightning::util::persist::KVStore;
 
 use lightning::util::config::{ChannelHandshakeConfig, UserConfig};
 pub use lightning::util::logger::Level as LogLevel;
@@ -178,7 +178,7 @@ uniffi::include_scaffolding!("ldk_node");
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
 ///
 /// Needs to be initialized and instantiated through [`Builder::build`].
-pub struct Node<K: KVStore + Sync + Send + 'static> {
+pub struct Node {
 	runtime: Arc<RwLock<Option<tokio::runtime::Runtime>>>,
 	stop_sender: tokio::sync::watch::Sender<()>,
 	config: Arc<Config>,
@@ -186,21 +186,22 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	tx_sync: Arc<EsploraSyncClient<Arc<FilesystemLogger>>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<FeeEstimator>,
-	event_queue: Arc<EventQueue<K, Arc<FilesystemLogger>>>,
-	channel_manager: Arc<ChannelManager<K>>,
-	chain_monitor: Arc<ChainMonitor<K>>,
-	output_sweeper: Arc<Sweeper<K>>,
-	peer_manager: Arc<PeerManager<K>>,
+	event_queue: Arc<EventQueue<Arc<FilesystemLogger>>>,
+	channel_manager: Arc<ChannelManager>,
+	chain_monitor: Arc<ChainMonitor>,
+	output_sweeper: Arc<Sweeper>,
+	peer_manager: Arc<PeerManager>,
+	connection_manager: Arc<ConnectionManager<Arc<FilesystemLogger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<NetworkGraph>,
 	gossip_source: Arc<GossipSource>,
-	liquidity_source: Option<Arc<LiquiditySource<K, Arc<FilesystemLogger>>>>,
-	kv_store: Arc<K>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<FilesystemLogger>>>>,
+	kv_store: Arc<DynStore>,
 	logger: Arc<FilesystemLogger>,
 	_router: Arc<Router>,
 	scorer: Arc<Mutex<Scorer>>,
-	peer_store: Arc<PeerStore<K, Arc<FilesystemLogger>>>,
-	payment_store: Arc<PaymentStore<K, Arc<FilesystemLogger>>>,
+	peer_store: Arc<PeerStore<Arc<FilesystemLogger>>>,
+	payment_store: Arc<PaymentStore<Arc<FilesystemLogger>>>,
 	is_listening: Arc<AtomicBool>,
 	latest_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
 	latest_onchain_wallet_sync_timestamp: Arc<RwLock<Option<u64>>>,
@@ -209,7 +210,7 @@ pub struct Node<K: KVStore + Sync + Send + 'static> {
 	latest_node_announcement_broadcast_timestamp: Arc<RwLock<Option<u64>>>,
 }
 
-impl<K: KVStore + Sync + Send + 'static> Node<K> {
+impl Node {
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
@@ -502,6 +503,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 		}
 
 		// Regularly reconnect to persisted peers.
+		let connect_cm = Arc::clone(&self.connection_manager);
 		let connect_pm = Arc::clone(&self.peer_manager);
 		let connect_logger = Arc::clone(&self.logger);
 		let connect_peer_store = Arc::clone(&self.peer_store);
@@ -522,11 +524,9 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 								.collect::<Vec<_>>();
 
 							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let res = do_connect_peer(
+								let res = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
-									Arc::clone(&connect_pm),
-									Arc::clone(&connect_logger),
 									).await;
 								match res {
 									Ok(_) => {
@@ -875,14 +875,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
@@ -950,14 +949,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
@@ -1659,14 +1657,13 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
-		let con_logger = Arc::clone(&self.logger);
-		let con_pm = Arc::clone(&self.peer_manager);
+		let con_cm = Arc::clone(&self.connection_manager);
 
 		// We need to use our main runtime here as a local runtime might not be around to poll
 		// connection futures going forward.
 		tokio::task::block_in_place(move || {
 			runtime.block_on(async move {
-				connect_peer_if_necessary(con_node_id, con_addr, con_pm, con_logger).await
+				con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 			})
 		})?;
 
@@ -1865,7 +1862,7 @@ impl<K: KVStore + Sync + Send + 'static> Node<K> {
 	}
 }
 
-impl<K: KVStore + Sync + Send + 'static> Drop for Node<K> {
+impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
@@ -1906,57 +1903,4 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted since the [`Node`] was initialized.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
-}
-
-async fn connect_peer_if_necessary<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
-	if peer_manager.peer_by_node_id(&node_id).is_some() {
-		return Ok(());
-	}
-
-	do_connect_peer(node_id, addr, peer_manager, logger).await
-}
-
-async fn do_connect_peer<K: KVStore + Sync + Send + 'static>(
-	node_id: PublicKey, addr: SocketAddress, peer_manager: Arc<PeerManager<K>>,
-	logger: Arc<FilesystemLogger>,
-) -> Result<(), Error> {
-	log_info!(logger, "Connecting to peer: {}@{}", node_id, addr);
-
-	let socket_addr = addr
-		.to_socket_addrs()
-		.map_err(|e| {
-			log_error!(logger, "Failed to resolve network address: {}", e);
-			Error::InvalidSocketAddress
-		})?
-		.next()
-		.ok_or(Error::ConnectionFailed)?;
-
-	match lightning_net_tokio::connect_outbound(Arc::clone(&peer_manager), node_id, socket_addr)
-		.await
-	{
-		Some(connection_closed_future) => {
-			let mut connection_closed_future = Box::pin(connection_closed_future);
-			loop {
-				match futures::poll!(&mut connection_closed_future) {
-					std::task::Poll::Ready(_) => {
-						log_info!(logger, "Peer connection closed: {}@{}", node_id, addr);
-						return Err(Error::ConnectionFailed);
-					},
-					std::task::Poll::Pending => {},
-				}
-				// Avoid blocking the tokio context by sleeping a bit
-				match peer_manager.peer_by_node_id(&node_id) {
-					Some(_) => return Ok(()),
-					None => tokio::time::sleep(Duration::from_millis(10)).await,
-				}
-			}
-		},
-		None => {
-			log_error!(logger, "Failed to connect to peer: {}@{}", node_id, addr);
-			Err(Error::ConnectionFailed)
-		},
-	}
 }

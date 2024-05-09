@@ -35,7 +35,9 @@ lightning-persister = { version = "0.0.123-beta" }
 lightning-background-processor = { version = "0.0.123-beta", features = ["futures"] }
 lightning-rapid-gossip-sync = { version = "0.0.123-beta" }
 lightning-transaction-sync = { version = "0.0.123-beta", features = ["esplora-async-https", "time"] }
-lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
+#lightning-liquidity = { version = "0.1.0-alpha.1", features = ["std"] }
+
+lightning-liquidity = { git = "https://github.com/tnull/lightning-liquidity", rev = "abf7088c0e03221c0f122e797f34802c9e99a3d4", features = ["std"] }
 
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std"] }
 #lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main" }
@@ -64,7 +66,6 @@ bip39 = "2.0.0"
 
 rand = "0.8.5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-futures = "0.3"
 tokio = { version = "1", default-features = false, features = [ "rt-multi-thread", "time", "sync" ] }
 esplora-client = { version = "0.6", default-features = false }
 libc = "0.2"
@@ -80,8 +81,6 @@ winapi = { version = "0.3", features = ["winbase"] }
 [dev-dependencies]
 lightning = { version = "0.0.123-beta", features = ["std", "_test_utils"] }
 #lightning = { git = "https://github.com/lightningdevkit/rust-lightning", branch="main", features = ["std", "_test_utils"] }
-#lightning = { git = "https://github.com/tnull/rust-lightning", branch = "2024-03-invoice-generated-event", features = ["std", "_test_utils"] }
-#lightning = { path = "../rust-lightning/lightning", features = ["std", "_test_utils"] }
 electrum-client = { version = "0.15.1", default-features = true }
 bitcoincore-rpc = { version = "0.17.0", default-features = false }
 proptest = "1.0.0"
