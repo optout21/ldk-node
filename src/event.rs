@@ -30,8 +30,6 @@ use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
-#[cfg(any(dual_funding, splicing))]
-use bitcoin::Sequence;
 
 use rand::{thread_rng, Rng};
 
@@ -412,6 +410,7 @@ where
 					},
 				}
 			},
+			/* Note: FundingInputsContributionReady is no longer used
 			// Channel open V2 (dual funding)
 			#[cfg(any(dual_funding, splicing))]
 			LdkEvent::FundingInputsContributionReady {
@@ -459,6 +458,7 @@ where
 					}
 				}
 			}
+			*/
 			// Channel open V2 (dual funding)
 			#[cfg(any(dual_funding, splicing))]
 			LdkEvent::FundingTransactionReadyForSigning {
@@ -821,10 +821,10 @@ where
 			LdkEvent::OpenChannelV2Request {
 				temporary_channel_id,
 				counterparty_node_id,
-				funding_satoshis,
+				counterparty_funding_satoshis,
 				channel_type,
 			} => {
-				self.handle_open_channel_request(temporary_channel_id, counterparty_node_id, funding_satoshis, channel_type, 0);
+				self.handle_open_channel_request(temporary_channel_id, counterparty_node_id, counterparty_funding_satoshis, channel_type, 0);
 			},
 			LdkEvent::PaymentForwarded {
 				prev_channel_id,
@@ -994,6 +994,7 @@ where
 			LdkEvent::InvoiceRequestFailed { .. } => {},
 			LdkEvent::ConnectionNeeded { .. } => {},
 
+			/* Note: SpliceAckedInputsContributionReady is no longer used
 			// #SPLICING
 			#[cfg(splicing)]
 			LdkEvent::SpliceAckedInputsContributionReady {
@@ -1041,6 +1042,7 @@ where
 					}
 				}
 			}
+			*/
 		}
 	}
 

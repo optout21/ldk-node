@@ -161,6 +161,8 @@ use lightning_invoice::{payment, Bolt11Invoice, Currency};
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
+#[cfg(any(dual_funding, splicing))]
+use bitcoin::Sequence;
 
 use bitcoin::{Address, Txid};
 
@@ -993,9 +995,26 @@ impl Node {
 				Some(user_config),
 			)
 		} else {
+			let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+			// Get some inputs to fund this transaction.
+			let funding_inputs = match self.wallet.prepare_funding_inputs(channel_amount_sats, confirmation_target) {
+				Err(e) => {
+					log_error!(self.logger, "Failed to prepare inputs for funding transaction: {}", e);
+					return Err(e);
+				}
+				Ok(mut funding_inputs) => {
+					// Reset sequence to 0 on the inputs
+					for i in &mut funding_inputs {
+						i.0.sequence = Sequence::ZERO;
+					}
+					funding_inputs
+				}
+			};
+
 			self.channel_manager.create_dual_funded_channel(
 				peer_info.node_id,
 				channel_amount_sats,
+				funding_inputs,
 				Some(ConfirmationTarget::OnChainSweep),
 				user_channel_id,
 				Some(user_config),
@@ -1091,6 +1110,26 @@ impl Node {
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
+			// Get some inputs to fund this splice.
+			let funding_inputs = if delta_amount_sats <= 0 {
+				Vec::new()
+			} else {
+				let confirmation_target = ConfirmationTarget::NonAnchorChannelFee;
+				match self.wallet.prepare_funding_inputs(delta_amount_sats as u64, confirmation_target) {
+					Err(e) => {
+						log_error!(self.logger, "Failed to prepare inputs for splice transaction: {}", e);
+						return Err(e);
+					}
+					Ok(mut funding_inputs) => {
+						// Reset sequence to 0 on the inputs
+						for i in &mut funding_inputs {
+							i.0.sequence = Sequence::ZERO;
+						}
+						funding_inputs
+					}
+				}
+			};
+
 			let funding_feerate_perkw = 1024; // TODO
 			let locktime = 0; // TODO
 			self.channel_manager
@@ -1098,6 +1137,7 @@ impl Node {
 					&channel_details.channel_id,
 					&counterparty_node_id,
 					delta_amount_sats,
+					funding_inputs,
 					funding_feerate_perkw,
 					locktime,
 				)
